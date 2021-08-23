@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 
+from email.header import decode_header
 from libpius.util import PiusUtil as util
 from libpius.util import MyOption as piusopt
 from libpius import mailer as pmailer
@@ -182,12 +183,15 @@ class PiusParser:
             name = None
             mail = None
             if uid:
+                uid = ''.join([ t[0] if type(t[0])==str else t[0].decode(t[1] or 'ASCII') for t in decode_header(uid) ])
                 match = UID_RE.search(uid)
                 if match:
                     name = match.group(1)
                     mail = match.group(2)
                     name = FIXNAME1_RE.sub("", name)
                     name = FIXNAME2_RE.sub("", name)
+                else: 
+                    mail = uid.split(',')[0]
             for part in msg.walk():
                 # if decoded returns None, we're in multipart messages, or other
                 # non-convertable-to-text data, so we can move on. If it's multipart
@@ -678,6 +682,12 @@ could not be found. For completness sake, it can also import keys from a file.
         " want -D, -E, -F, and -N to control CSV parsing.",
     )
     build.add_option(
+        "--maillist-file",
+        dest="maillist_file",
+        metavar="FILE",
+        help="Output file with comma-separated emails.",
+    )
+    build.add_option(
         "--delimiter",
         dest="delimiter",
         metavar="DELIMITER",
@@ -852,6 +862,9 @@ There are no options"""
             sys.exit(0)
 
         if keys:
+            if options.maillist_file:
+                with open(options.maillist_file, 'w') as f:
+                    f.write(', '.join([k['email'] for k in keys if k is not None]))
             kb.get_all_keys(keys)
             if options.verbose:
                 kb.print_report()
