@@ -1,242 +1,130 @@
-#!/usr/bin/perl
+#!/usr/bin/env python3
+# inspired by gpgparticipants
 
-# vim:expandtab:ai:tabstop=2:textwidth=78:softtabstop=2:shiftwidth=2
+import os
+import re
+import subprocess
+from optparse import OptionParser
+from libpius.util import MyOption
+from libpius.constants import (
+    DEFAULT_GPG_PATH,
+    GPG_MIN_OPTS,
+)
+import html
 
-use strict;
-use warnings;
-use Getopt::Long;
-
-#
-# Copyright (c) 2008 - present Phil Dibowitz (phil@ipom.com)
-#
-#   This program is free software; you can redistribute it and/or
-#   modify it under the terms of the GNU General Public License as
-#   published by the Free Software Foundation, version 2.
-#
-# Given a PGP Keyring, generate a worksheet for a keysigning party.
-#
-# This is largely based on party-table.pl by
-#   V. Alex Brennen <vab@cryptnet.net> and Gerfried Fuchs <alfie@ist.org>
-# You can find the original at http://www.cryptnet.net/people/vab/
-#
-
-use constant VERSION => '3.0.0';
-
-sub print_html_header
-{
-  my $extra_fields = shift;
-  print "<html>\n<head><title>PGP Keysigning Party Keys</title></head>\n";
-  print "<body>\n<table border=1>\n";
-  print "<tr>\n"
-    . "  <th>Key ID</th>\n  <th>Owner</th>\n  <th>Fingerprint</th>\n"
-    . "  <th>Size</th>\n  <th>Type</th>\n  <th>Key Info Matches?</th>\n"
-    . "  <th>Owner ID Matches?</th>\n";
-  foreach my $field (@$extra_fields) {
-    print "  <th>$field</th>\n";
-  }
-  print "</tr>\n";
+def main():
+    usage = ""
+    parser = OptionParser(option_class=MyOption)
+    parser.set_defaults(
+        gpg_path=DEFAULT_GPG_PATH,
+    )
+    parser.add_option(
+        "-r",
+        "--keyring",
+        dest="keyring",
+        metavar="KEYRING",
+        nargs=1,
+        type="not_another_opt",
+        help="The keyring to use. Be sure to specify full or"
+        " relative path. Use a path: Just a filename may cause"
+        " GPG to assume relative to ~/.gnupg and cause"
+        " unexpected results.",
+    )
+    parser.add_option(
+        "-b",
+        "--gpg-path",
+        dest="gpg_path",
+        metavar="PATH",
+        nargs=1,
+        type="not_another_opt",
+        help="Path to gpg binary. [default: %default]",
+    )
+    parser.add_option(
+        "-t",
+        "--title",
+        dest="title",
+        help="Title to put at the top of the page.",
+    )
+    parser.add_option(
+        "-c",
+        "--print-checksums",
+        dest="print_checksums",
+        action="store_true",
+        help="Print checksums",
+    )
+    parser.add_option(
+        "--html",
+        dest="html_file",
+        metavar="FILE",
+        help="Output html file location.",
+    )
+    (options, args) = parser.parse_args()
+    if options.keyring:
+        options.keyring = os.path.expanduser(options.keyring)
+        if not os.path.exists(options.keyring):
+            parser.error("Keyring %s doesn't exist" % options.keyring)
+    cmd = (
+            [options.gpg_path]
+            + (["--no-default-keyring", "--keyring", options.keyring] if options.keyring else [])
+            + [
+                "--list-keys",
+                "--list-options", "no-show-photos,no-show-uid-validity,no-show-keyring,no-show-usage",
+                "--keyid-format", "none",
+                "--display-charset", "utf-8",
+                "--with-fingerprint",
+                "--no-auto-check-trustdb",
+            ]
+        )
+    gpg = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={'LANGUAGE': 'en'}
+        ).stdout.read()
+    gpg = '\n'.join([l for l in gpg.strip().splitlines()[2:] if 'sub' not in l])
+    keys = re.split(r"(?:\r?\n){2,}", gpg)
+    htmltemplate = '''<html>
+<head>
+<meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:ital@0;1&display=swap" rel="stylesheet"> 
+<style>
+@page { size: A4; margin: 2cm; }
+h1 { text-align: center; }
+.block {
+    white-space: pre;
+    break-inside: avoid;
 }
+body { font-family: "Roboto Mono", monospace; font-size: 12px;}
+.gap { font-size: 20px; }
+</style>
+</head>
+<body>
+'''+('<h1>'+options.title+'</h1><hr>\n'
+    if options.title else '')+('''<div class="block">
+[ ] SHA256: <span class="gap">____ ____   ____ ____   ____ ____   ____ ____</span>
 
-sub get_fingerprints
-{
-  my $keyring = shift;
-  my $cmd = 'gpg2 --fingerprint --no-default-keyring --no-options'
-    . " --with-colons --keyring $keyring | egrep "
-    . '\'^(pub|fpr|uid):\'';
-  my @fps = `$cmd`;
-  return \@fps;
-}
+            <span class="gap">____ ____   ____ ____   ____ ____   ____ ____</span>
 
-sub parse_fingerprints
-{
-  my $fps = shift;
-  my $key_metadata = {};
-  # This goes like this:
-  # pub <-- public key info
-  # fpr <-- fingerprint for previous line
-  # uid <-- uid
-  #     ... possibly many of these
-  # sub <-- subkey
-  # fpr <-- fingerprint for previous line
-  #     ... possibly many sub/fpr pairs
-  while (my $line = shift(@{$fps})) {
-    if ($line =~ /^pub/) {
-      my $have_uid = 0;
-      my $have_fpr = 0;
-      my ($fingerprint, $owner, $size, $type, $longid, $date, $settrust, $flags);
-      # pubkey line
-      # pub:-:4096:1:A8B51F5E8032CCE4:1305730074:1590597119::-:::scESC:::::::
-      (undef, undef, $size, $type, $longid, $date, undef,
-       undef, $settrust, undef, undef, undef, $flags, undef) = split(/:/, $line);
-      while (my $next = shift(@{$fps})) {
-        if (!$have_fpr && $next =~ /^fpr/) {
-          # fpr:::::::::FB298ABBE1D00A1C8FA4DC1FA8B51F5E8032CCE4:
-          (undef, undef, undef, undef, undef, undef, undef, undef, undef,
-            $fingerprint) = split(/:/, $next);
-          $have_fpr = 1;
-          next;
-        }
-        if (!$have_uid && $next =~ /^uid/) {
-          (undef, undef, undef, undef, undef, undef, undef, undef, undef,
-           $owner) = split(/:/, $next);
-          $have_uid = 1;
-          last;
-        }
-      }
+[ ] RIPEMD160: <span class="gap">____ ____ ____ ____ ____</span>
 
-      # cribbed from common/openpgpdefs.h in the gnupg source
-      # RSA, RSA encrypt-only (legacy), RSA sign-only (legacy)
-      if ($type eq '1' || $type eq '2' || $type eq '3') {
-        $type = 'RSA';
-      # ElGamal encrypt-only
-      } elsif ($type eq '16') {
-        $type = 'El Gamal';
-      } elsif ($type eq '17') {
-        $type = 'DSA';
-      # RFC-6637, i.e. NISTP
-      } elsif ($type eq '18') {
-        $type = 'ECDH';
-      # RFC-6637, i.e. NISTP
-      } elsif ($type eq '19') {
-        $type = 'ECDSA';
-      # ElGamal encrypt+sign (legacy)
-      } elsif ($type eq '20') {
-        $type = 'El Gamal';
-      } elsif ($type eq '22') {
-        $type = 'EDDSA';
-      } else {
-        $type = 'Unknown';
-      }
+               <span class="gap">____ ____ ____ ____ ____</span>
 
-      if (length($fingerprint) == 40) {
-        for my $i (qw(36 32 28 24 20 16 12 8 4)) {
-          if ($i != 20) {
-            substr($fingerprint, $i, 0, ' ');
-          }
-          if ($i == 20) {
-            substr($fingerprint, $i, 0, "\n");
-          }
-        }
-      } elsif (length($fingerprint) == 32) {
-        for my $i (qw(30 28 26 24 22 20 18 16 14 12 10 8 6 4 2)) {
-          if ($i != 16) {
-            substr($fingerprint, $i, 0, ' ');
-          }
-          if ($i == 16) {
-            substr($fingerprint, $i, 0, "\n");
-          }
-        }
-      }
-      $owner =~ s/&/&amp;/;
-      $owner =~ s/</&lt\;/;
-      $owner =~ s/>/&gt\;/;
-  
-      push (@{$key_metadata->{$owner}},
-            {'id' => $longid,
-             'owner' => $owner,
-            'fingerprint' => $fingerprint,
-            'size' => $size,
-            'type' => $type});
-    }
-  }
-  return $key_metadata;
-}
+You can compute checksums using:
+    gpg --print-md SHA256 <i>file</i>
+    gpg --print-md RIPEMD160 <i>file</i><hr></div>
+''' if options.print_checksums else '')+'\n'.join([
+    '<div class="block">'
+    +html.escape(("%03d   [ ] Fingerprint OK [ ] ID OK\n" % i) + k)+'<hr></div>'
+            for i, k in enumerate(keys, start=1)
+        ])+'''
+</body>
+</html>'''
+    if options.html_file:
+        with open(options.html_file, 'w') as f:
+            f.write(htmltemplate)
+    else:
+        print(htmltemplate)
 
-sub print_table_body
-{
-  my ($metadata, $num_fields) = @_;
-  # Loop to create extra-fields HTML only once
-  my $extra_fields_html = '';
-  for (my $i = 0; $i < $num_fields; $i++) {
-    $extra_fields_html .= "  <td>&nbsp;</td>\n";
-  }
-  foreach my $user (sort(keys(%{$metadata}))) {
-      foreach my $key (@{$metadata->{$user}}) {
-        print "<tr>\n"
-          . "  <td><pre>$key->{'id'}</pre></td>\n"
-          . "  <td>$key->{'owner'}</td>\n"
-          . "  <td><pre>$key->{'fingerprint'}</pre></td>\n"
-          . "  <td>$key->{'size'}</td>\n"
-          . "  <td>$key->{'type'}</td>\n"
-          . "  <td>&nbsp;</td>\n"
-          . "  <td>&nbsp;</td>\n"
-          . $extra_fields_html
-          . "</tr>\n";
-
-      }
-  }
-}
-
-sub print_html_footer
-{
-  print "</table>\n</body>\n</html>";
-}
-
-sub help
-{
-  my $err = shift || 0;
-
-  # If we're printing this due to incorrect usage, the user is probably
-  # re-directing output to a file, so we need to print to stderr.
-  my $fh = *STDOUT;
-  if ($err) {
-    $fh = *STDERR;
-  }
-    
-  print $fh 'PIUS PGP Keysigning Party Worksheet Generator ' . VERSION . "\n\n";
-  print $fh <<EOF;
-Usage: $0 <options> <keyring> > out-file.html
-
-<keyring> should be the gpg keyring file with the public keys for all party
-participants.
-
-Options:
-  -e, --extra-fields <fields>
-  A comma-separated list of extra colums to have. This is useful if a subset
-  of the participants want to do something extra such as S/MIME for CA Cert
-  verification.
-
-  -h, --help
-  Print this help message and exit.
-
-  -v, --version
-  Print the version and exit.
-
-EOF
-}
-
-my $opts = {};
-GetOptions($opts,
-           'extra-fields|e=s',
-           'help|h',
-           'version|v',
-           ) || die('Bad options');
-
-if (exists($opts->{'help'})) {
-  help();
-  exit(0);
-}
-
-if (exists($opts->{'version'})) {
-  print "$0 " . VERSION . "\n";
-  exit(0);
-}
-
-my $extra_fields = [];
-if (exists($opts->{'extra-fields'})) {
-  @$extra_fields = split(',', $opts->{'extra-fields'});
-}
-
-my $keyring = shift;
-
-unless($keyring) {
-  help(1);
-  exit(1);
-}
-
-my $fps = get_fingerprints($keyring);
-my $metadata = parse_fingerprints($fps);
-print_html_header($extra_fields);
-print_table_body($metadata, scalar(@$extra_fields));
-print_html_footer();
-
+if __name__ == "__main__":
+    main()

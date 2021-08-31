@@ -864,7 +864,10 @@ There are no options"""
         if keys:
             if options.maillist_file:
                 with open(options.maillist_file, 'w') as f:
-                    f.write(', '.join([k['email'] for k in keys if k is not None]))
+                    f.write(', '.join([
+                        (k['name']+' <'+k['email']+'>' if k['name'] else k['email'])
+                        for k in keys if k is not None and k['email']
+                    ]))
             kb.get_all_keys(keys)
             if options.verbose:
                 kb.print_report()
